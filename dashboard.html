@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Job Mailer — Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="page-header">
+      <span class="brand-mark">UJ</span>
+      <h1>Dashboard</h1>
+      <span id="queueBadge" class="queue-badge hidden"></span>
+    </header>
+
+    <section id="notification" class="notification hidden" role="status"></section>
+
+    <section class="stats" id="stats"></section>
+
+    <section class="toolbar">
+      <input type="search" id="searchInput" placeholder="Search company or email..." />
+      <select id="filterSelect">
+        <option value="all">All</option>
+        <option value="Replied">Replied</option>
+        <option value="Follow-up due">Follow-up due</option>
+        <option value="Sent">Sent (waiting)</option>
+        <option value="Followed up">Followed up</option>
+        <option value="No reply">No reply (done)</option>
+        <option value="Bounced">Bounced</option>
+        <option value="Queued">Queued / failed</option>
+      </select>
+      <div class="toolbar-actions">
+        <button id="checkBtn" class="btn btn-secondary" type="button">Check bounces &amp; replies</button>
+        <button id="followUpBtn" class="btn btn-primary" type="button" disabled>Queue follow-ups</button>
+        <button id="pauseBtn" class="btn btn-secondary hidden" type="button">Pause sending</button>
+        <button id="resumeBtn" class="btn btn-secondary hidden" type="button">Resume sending</button>
+        <button id="syncBtn" class="btn btn-secondary" type="button">Sync Drive</button>
+        <button id="csvBtn" class="btn btn-secondary" type="button">Download CSV</button>
+      </div>
+    </section>
+    <p id="progressText" class="hint"></p>
+
+    <section class="table-card">
+      <table id="table">
+        <thead>
+          <tr>
+            <th>Company</th>
+            <th>Email</th>
+            <th>Status</th>
+            <th>First sent</th>
+            <th>Last contact</th>
+            <th>Follow-ups</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <p id="emptyText" class="empty hidden">Nothing here yet.</p>
+      <div class="more-row"><button id="moreBtn" class="btn btn-secondary hidden" type="button">Show more</button></div>
+    </section>
+  </div>
+
+  <script src="storage.js"></script>
+  <script src="template.js"></script>
+  <script src="gmail.js"></script>
+  <script src="verify.js"></script>
+  <script src="sync.js"></script>
+  <script src="queue.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

@@ -9,44 +9,91 @@
   <div class="wrap">
     <header class="page-header">
       <span class="brand-mark">UJ</span>
-      <h1>Unity Job Mailer Settings</h1>
+      <h1>Job Mailer Settings</h1>
     </header>
 
     <section id="notification" class="notification hidden" role="status"></section>
 
     <section class="card">
+      <h2>Sender &amp; sending limits</h2>
       <label class="field">
         <span>Sender Name</span>
         <input type="text" id="senderName" placeholder="Your Full Name" />
       </label>
+      <div class="three-col">
+        <label class="field">
+          <span>Daily limit</span>
+          <input type="number" id="dailyLimit" min="0" max="2000" step="1" />
+        </label>
+        <label class="field">
+          <span>Delay min (sec)</span>
+          <input type="number" id="delayMin" min="1" max="600" step="1" />
+        </label>
+        <label class="field">
+          <span>Delay max (sec)</span>
+          <input type="number" id="delayMax" min="1" max="600" step="1" />
+        </label>
+      </div>
+      <p class="hint">
+        Each email waits a random time between min and max, and sending pauses when the daily limit is reached
+        and continues the next day by itself. A personal Gmail account allows roughly 500 emails a day;
+        sending many identical emails quickly can get an account flagged, so keep these conservative. Daily limit 0 = no limit.
+      </p>
+    </section>
 
-      <label class="field">
-        <span>Default Subject</span>
-        <input type="text" id="defaultSubject" placeholder="Application for Unity Developer Position" />
-      </label>
-
-      <label class="field">
-        <span>Default Email Template</span>
-        <textarea id="defaultTemplate" rows="10"></textarea>
-      </label>
-      <p class="hint">Variables available: <code>{{company}}</code> <code>{{name}}</code> <code>{{email}}</code></p>
-
-      <label class="field">
-        <span>CV Attachment (PDF)</span>
-        <input type="file" id="cvFile" accept="application/pdf" />
-      </label>
-      <p class="hint" id="cvStatusText">No CV uploaded yet.</p>
-
-      <label class="field">
-        <span>Delay Between Bulk Emails (seconds)</span>
-        <input type="number" id="sendDelaySeconds" min="1" max="120" step="1" />
-      </label>
-
+    <section class="card">
+      <h2>Email templates</h2>
+      <p class="hint">
+        The first template is the default. In a JSON list, <code>"template": "name"</code> picks another one.
+        Variables: <code>{{company}}</code> <code>{{name}}</code> <code>{{email}}</code> and any field from your JSON
+        (for example <code>{{hrName}}</code>). Use <code>{{hrName|Hiring Team}}</code> to give a fallback.
+      </p>
+      <div id="templateList"></div>
       <div class="actions-row">
-        <button id="clearBtn" class="btn btn-danger" type="button">Clear Settings</button>
-        <button id="saveBtn" class="btn btn-primary" type="button">Save Settings</button>
+        <button id="addTemplateBtn" class="btn btn-secondary" type="button">+ Add template</button>
       </div>
     </section>
+
+    <section class="card">
+      <h2>CVs (PDF)</h2>
+      <p class="hint">The first CV is the default. In a JSON list, <code>"cv": "name"</code> picks another one and <code>"cv": "none"</code> sends no attachment.</p>
+      <div id="cvList"></div>
+      <label class="field">
+        <span>Add a CV</span>
+        <input type="file" id="cvFile" accept="application/pdf" />
+      </label>
+    </section>
+
+    <section class="card">
+      <h2>Follow-ups</h2>
+      <div class="three-col">
+        <label class="field">
+          <span>Follow up after (days)</span>
+          <input type="number" id="followUpDays" min="1" max="60" step="1" />
+        </label>
+        <label class="field">
+          <span>Max follow-ups each</span>
+          <input type="number" id="maxFollowUps" min="0" max="5" step="1" />
+        </label>
+      </div>
+      <label class="field">
+        <span>Follow-up message</span>
+        <textarea id="followUpTemplate" rows="8"></textarea>
+      </label>
+      <p class="hint">Sent in the same Gmail thread as <code>Re: original subject</code>, without the CV. Variables: <code>{{company}}</code> <code>{{name}}</code> <code>{{days}}</code> <code>{{originalSubject}}</code>. Max 0 turns follow-ups off.</p>
+    </section>
+
+    <section class="card">
+      <h2>Automation</h2>
+      <label class="check"><input type="checkbox" id="autoCheck" /><span>Check for bounces and replies automatically in the background</span></label>
+      <label class="check"><input type="checkbox" id="autoSync" /><span>Sync history to my Google Drive automatically after sending</span></label>
+      <label class="check"><input type="checkbox" id="verifyDomains" /><span>Check recipient domains before sending (on by default in the Bulk tab)</span></label>
+    </section>
+
+    <div class="actions-row">
+      <button id="clearBtn" class="btn btn-danger" type="button">Clear Settings</button>
+      <button id="saveBtn" class="btn btn-primary" type="button">Save Settings</button>
+    </div>
   </div>
 
   <script src="storage.js"></script>

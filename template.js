@@ -1,9 +1,42 @@
+const PLACEHOLDER = /{{\s*([\w.-]+)\s*(?:\|([^}]*))?}}/g;
+
+function lowerKeys(variables) {
+  const out = {};
+  Object.keys(variables || {}).forEach((k) => {
+    out[k.toLowerCase()] = variables[k];
+  });
+  return out;
+}
+
+/*
+ * Replaces {{field}} with a value. Works for company / name / email and for ANY extra field
+ * from the JSON entry (e.g. {{hrName}}). {{hrName|Hiring Team}} uses the text after | when
+ * the field is empty or missing. A field that is unknown and has no fallback is left as-is
+ * (see findMissingPlaceholders).
+ */
 function renderTemplate(template, variables) {
-  let result = template || '';
-  result = result.split('{{company}}').join(variables.company || '');
-  result = result.split('{{name}}').join(variables.name || '');
-  result = result.split('{{email}}').join(variables.email || '');
-  return result;
+  const vars = lowerKeys(variables);
+  return String(template || '').replace(PLACEHOLDER, (match, key, fallback) => {
+    const name = key.toLowerCase();
+    const has = Object.prototype.hasOwnProperty.call(vars, name);
+    const value = has && vars[name] !== undefined && vars[name] !== null ? String(vars[name]) : '';
+    if (value.trim() !== '') return value;
+    if (fallback !== undefined) return fallback.trim();
+    return has ? '' : match;
+  });
+}
+
+// Names of {{fields}} that have no value and no fallback, so the email would go out with "{{field}}" in it.
+function findMissingPlaceholders(text, variables) {
+  const vars = lowerKeys(variables);
+  const missing = new Set();
+  String(text || '').replace(PLACEHOLDER, (match, key, fallback) => {
+    if (fallback === undefined && !Object.prototype.hasOwnProperty.call(vars, key.toLowerCase())) {
+      missing.add(key);
+    }
+    return match;
+  });
+  return [...missing];
 }
 
 const EMAIL_PATTERN = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
@@ -115,7 +148,23 @@ function parseBulkJson(rawText, historyMap) {
     const company = pickField(entry, ['company', 'companyname', 'company_name', 'organization']);
     const key = normalizeEmail(email);
 
-    const base = { email, company, status: 'Pending', error: null };
+    const fields = {};
+    if (entry && typeof entry === 'object') {
+      Object.keys(entry).forEach((k) => {
+        const v = entry[k];
+        if (v !== null && v !== undefined && typeof v !== 'object') fields[k] = String(v).trim();
+      });
+    }
+    const base = {
+      email,
+      company,
+      template: pickField(entry, ['template', 'templatename']),
+      cv: pickField(entry, ['cv', 'resume', 'cvname']),
+      fields,
+      kind: 'new',
+      status: 'Pending',
+      error: null
+    };
 
     const invalid = validateBulkEntry(email, company);
     if (invalid) {
@@ -131,4 +180,48 @@ function parseBulkJson(rawText, historyMap) {
     seen.add(key);
     return base;
   });
+}
+
+
+/*
+ * Chooses the template + CV for each Pending entry and makes sure the email can really be built.
+ * An entry may name its own with "template": "unity" and "cv": "unity" ("cv": "none" = no attachment).
+ * Anything that cannot be built is marked Failed with the reason, so it is never sent half-filled.
+ */
+function resolveBulkEntries(entries, settings, defaults) {
+  const dflt = defaults || {};
+  entries.forEach((entry) => {
+    if (entry.status !== 'Pending') return;
+
+    const templateName = entry.template || dflt.template || '';
+    const template = findByName(settings.templates, templateName);
+    if (!template) {
+      entry.status = 'Failed';
+      entry.error = `Unknown template "${templateName}"`;
+      return;
+    }
+
+    const cvName = entry.cv || dflt.cv || '';
+    let cv = null;
+    if (String(cvName).toLowerCase() !== 'none') {
+      cv = findByName(settings.cvs, cvName);
+      if (!cv) {
+        entry.status = 'Failed';
+        entry.error = cvName ? `Unknown CV "${cvName}"` : 'No CV added yet (add one in Settings)';
+        return;
+      }
+    }
+
+    const vars = { ...entry.fields, company: entry.company, name: settings.senderName || '', email: entry.email };
+    const missing = findMissingPlaceholders(`${template.subject}\n${template.body}`, vars);
+    if (missing.length) {
+      entry.status = 'Failed';
+      entry.error = `Missing field: ${missing.join(', ')}`;
+      return;
+    }
+
+    entry.template = template.name;
+    entry.cv = cv ? cv.name : 'none';
+  });
+  return entries;
 }

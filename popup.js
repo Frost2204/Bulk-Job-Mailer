@@ -1,67 +1,37 @@
 let currentToken = null;
 let currentUserEmail = '';
-let bulkEntries = [];
-let stopRequested = false;
-let bulkRunning = false;
+let previewEntries = [];
+let previewRun = 0; // bumps on every new preview so a slow older one cannot overwrite a newer one
+let verifying = false;
+let confirmAction = null;
+let queueTimer = null;
 
 const IS_FULL_TAB = new URLSearchParams(location.search).get('tab') === '1';
 
 const els = {};
 
+function $(id) {
+  return document.getElementById(id);
+}
+
 function cacheElements() {
-  els.notification = document.getElementById('notification');
-  els.authStatusText = document.getElementById('authStatusText');
-  els.authHintText = document.getElementById('authHintText');
-  els.connectBtn = document.getElementById('connectBtn');
-  els.signOutBtn = document.getElementById('signOutBtn');
-  els.openOptionsBtn = document.getElementById('openOptionsBtn');
-  els.openTabBtn = document.getElementById('openTabBtn');
-  els.popupModeTip = document.getElementById('popupModeTip');
-
+  [
+    'notification', 'authStatusText', 'authHintText', 'connectBtn', 'signOutBtn', 'openOptionsBtn', 'openTabBtn',
+    'openDashboardBtn', 'openDashboardBtn2', 'popupModeTip', 'singlePanel', 'bulkPanel', 'historyPanel',
+    'recipientEmail', 'companyName', 'singleTemplateSelect', 'singleCvSelect', 'emailSubject', 'emailTemplate',
+    'extraFields', 'previewBtn', 'testSendBtn', 'sendBtn', 'previewBox', 'previewContent',
+    'queueCard', 'queueStateText', 'queueCountsText', 'queueProgressBar', 'queueNote', 'pauseBtn', 'resumeBtn',
+    'cancelQueueBtn', 'queueDashboardBtn',
+    'bulkTemplateSelect', 'bulkCvSelect', 'bulkJsonFile', 'bulkJsonInput', 'bulkInputInfo', 'verifyDomainsCheck',
+    'validateJsonBtn', 'bulkTestBtn', 'sendAllBtn', 'verifyProgress', 'bulkSummary', 'bulkTableWrap', 'bulkTableBody',
+    'historyCountBadge', 'historyCount', 'repliedCount', 'bouncedCount', 'autoExportCheck', 'exportHistoryBtn',
+    'clearHistoryBtn', 'importHistoryFile', 'checkBouncesBtn', 'bounceProgress', 'manualBounceInput', 'markBouncedBtn',
+    'followUpInfo', 'queueFollowUpsBtn', 'syncBtn', 'syncInfo',
+    'confirmModal', 'confirmModalTitle', 'confirmModalText', 'confirmModalWarn', 'confirmCancelBtn', 'confirmSendBtn'
+  ].forEach((id) => {
+    els[id] = $(id);
+  });
   els.tabs = document.querySelectorAll('.tab');
-  els.singlePanel = document.getElementById('singlePanel');
-  els.bulkPanel = document.getElementById('bulkPanel');
-  els.historyPanel = document.getElementById('historyPanel');
-
-  els.recipientEmail = document.getElementById('recipientEmail');
-  els.companyName = document.getElementById('companyName');
-  els.emailSubject = document.getElementById('emailSubject');
-  els.emailTemplate = document.getElementById('emailTemplate');
-  els.previewBtn = document.getElementById('previewBtn');
-  els.sendBtn = document.getElementById('sendBtn');
-  els.previewBox = document.getElementById('previewBox');
-  els.previewContent = document.getElementById('previewContent');
-
-  els.bulkJsonFile = document.getElementById('bulkJsonFile');
-  els.bulkInputInfo = document.getElementById('bulkInputInfo');
-  els.stopBtn = document.getElementById('stopBtn');
-  els.bulkSummary = document.getElementById('bulkSummary');
-  els.bulkProgress = document.getElementById('bulkProgress');
-  els.bulkProgressBar = document.getElementById('bulkProgressBar');
-
-  els.historyCountBadge = document.getElementById('historyCountBadge');
-  els.historyCount = document.getElementById('historyCount');
-  els.bouncedCount = document.getElementById('bouncedCount');
-  els.checkBouncesBtn = document.getElementById('checkBouncesBtn');
-  els.bounceProgress = document.getElementById('bounceProgress');
-  els.manualBounceInput = document.getElementById('manualBounceInput');
-  els.markBouncedBtn = document.getElementById('markBouncedBtn');
-  els.autoExportCheck = document.getElementById('autoExportCheck');
-  els.exportHistoryBtn = document.getElementById('exportHistoryBtn');
-  els.clearHistoryBtn = document.getElementById('clearHistoryBtn');
-  els.importHistoryFile = document.getElementById('importHistoryFile');
-
-  els.bulkJsonInput = document.getElementById('bulkJsonInput');
-  els.validateJsonBtn = document.getElementById('validateJsonBtn');
-  els.sendAllBtn = document.getElementById('sendAllBtn');
-  els.bulkTableWrap = document.getElementById('bulkTableWrap');
-  els.bulkTableBody = document.getElementById('bulkTableBody');
-
-  els.confirmModal = document.getElementById('confirmModal');
-  els.confirmModalText = document.getElementById('confirmModalText');
-  els.confirmModalWarn = document.getElementById('confirmModalWarn');
-  els.confirmCancelBtn = document.getElementById('confirmCancelBtn');
-  els.confirmSendBtn = document.getElementById('confirmSendBtn');
 }
 
 function showNotification(message, type) {
@@ -72,6 +42,18 @@ function showNotification(message, type) {
 function clearNotification() {
   els.notification.className = 'notification hidden';
 }
+
+function kickWorker() {
+  try {
+    chrome.runtime.sendMessage({ type: 'kick' }, () => void chrome.runtime.lastError);
+  } catch (err) {
+    /* worker wakes on its own alarm anyway */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Auth                                                                */
+/* ------------------------------------------------------------------ */
 
 function setAuthUi(connected, email) {
   if (connected) {
@@ -109,8 +91,15 @@ async function handleConnect() {
     await setUserEmail(email);
     setAuthUi(true, email);
     showNotification('Gmail connected successfully.', 'success');
+    // A queue that paused because Gmail was disconnected can carry on now.
+    const meta = await getQueueMeta();
+    if (meta.state === 'paused' && /connect/i.test(meta.lastError || '')) {
+      await resumeQueue();
+      kickWorker();
+    }
   } catch (err) {
-    if (String(err.message).toLowerCase().includes('cancelled') || String(err.message).toLowerCase().includes('user did not approve')) {
+    const msg = String(err.message).toLowerCase();
+    if (msg.includes('cancelled') || msg.includes('user did not approve')) {
       showNotification('Google authentication was cancelled.', 'error');
     } else {
       showNotification(err.message || 'Login failed. Please try again.', 'error');
@@ -138,56 +127,112 @@ async function handleSignOut() {
 }
 
 function switchTab(tabName) {
-  els.tabs.forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.tab === tabName);
-  });
+  els.tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === tabName));
   els.singlePanel.classList.toggle('hidden', tabName !== 'single');
   els.bulkPanel.classList.toggle('hidden', tabName !== 'bulk');
   els.historyPanel.classList.toggle('hidden', tabName !== 'history');
-  if (tabName === 'history') {
-    refreshHistoryCount();
+  if (tabName === 'history') refreshHistoryPanel();
+  if (tabName === 'bulk') renderQueueCard();
+}
+
+/* ------------------------------------------------------------------ */
+/* Templates / CV pickers                                              */
+/* ------------------------------------------------------------------ */
+
+function fillSelect(select, options, selected) {
+  select.innerHTML = '';
+  options.forEach(([value, label]) => {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = label;
+    select.appendChild(opt);
+  });
+  if (selected !== undefined && options.some(([v]) => v === selected)) select.value = selected;
+}
+
+async function populateSelects() {
+  const settings = await getSettingsResolved();
+  const templateOptions = settings.templates.map((t) => [t.name, t.name]);
+  const cvOptions = settings.cvs.map((c) => [c.name, c.name]).concat([['none', 'No attachment']]);
+  fillSelect(els.singleTemplateSelect, templateOptions, els.singleTemplateSelect.value);
+  fillSelect(els.bulkTemplateSelect, templateOptions, els.bulkTemplateSelect.value);
+  fillSelect(els.singleCvSelect, cvOptions, els.singleCvSelect.value);
+  fillSelect(els.bulkCvSelect, cvOptions, els.bulkCvSelect.value);
+  return settings;
+}
+
+async function loadTemplateIntoSingleForm() {
+  const settings = await getSettingsResolved();
+  const template = findByName(settings.templates, els.singleTemplateSelect.value);
+  if (template) {
+    els.emailSubject.value = template.subject || '';
+    els.emailTemplate.value = template.body || '';
   }
 }
 
-async function loadDefaultsIntoForm() {
-  const settings = await getSettings();
-  els.emailSubject.value = settings.defaultSubject || '';
-  els.emailTemplate.value = settings.defaultTemplate || '';
+/* ------------------------------------------------------------------ */
+/* Single email                                                        */
+/* ------------------------------------------------------------------ */
+
+function parseExtraFields() {
+  const raw = els.extraFields.value.trim();
+  if (!raw) return {};
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (err) {
+    throw new Error('Extra fields must be valid JSON, like {"hrName":"Anita"}.');
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Extra fields must be a JSON object, like {"hrName":"Anita"}.');
+  }
+  return data;
 }
 
-function buildSinglePreviewText(senderName) {
-  return renderTemplate(els.emailTemplate.value, {
+function singleVariables(settings) {
+  return {
+    ...parseExtraFields(),
     company: els.companyName.value.trim(),
-    name: senderName,
+    name: settings.senderName || '',
     email: els.recipientEmail.value.trim()
-  });
+  };
+}
+
+function selectedCv(settings, select) {
+  if (select.value === 'none') return { cv: null, error: null };
+  const cv = findByName(settings.cvs, select.value);
+  if (!cv) return { cv: null, error: 'No CV added yet. Add one in Settings, or choose "No attachment".' };
+  return { cv, error: null };
 }
 
 async function handlePreview() {
   clearNotification();
-  if (!els.companyName.value.trim()) {
-    showNotification('Company name is missing.', 'error');
-    return;
+  try {
+    if (!els.companyName.value.trim()) {
+      showNotification('Company name is missing.', 'error');
+      return;
+    }
+    const settings = await getSettingsResolved();
+    const vars = singleVariables(settings);
+    const missing = findMissingPlaceholders(`${els.emailSubject.value}\n${els.emailTemplate.value}`, vars);
+    if (missing.length) {
+      showNotification(`Missing field: ${missing.join(', ')}. Add it in Extra fields.`, 'error');
+      return;
+    }
+    els.previewContent.textContent = `Subject: ${renderTemplate(els.emailSubject.value, vars)}\n\n${renderTemplate(els.emailTemplate.value, vars)}`;
+    els.previewBox.classList.remove('hidden');
+  } catch (err) {
+    showNotification(err.message, 'error');
   }
-  const settings = await getSettings();
-  const bodyText = buildSinglePreviewText(settings.senderName || '');
-  els.previewContent.textContent = bodyText;
-  els.previewBox.classList.remove('hidden');
 }
 
 function validateSingleForm() {
-  if (!currentUserEmail) {
-    return 'Please connect your Gmail account first.';
-  }
-  if (!els.recipientEmail.value.trim()) {
-    return 'Recipient email is missing.';
-  }
-  if (!els.companyName.value.trim()) {
-    return 'Company name is missing.';
-  }
-  if (!els.emailSubject.value.trim()) {
-    return 'Subject is missing.';
-  }
+  if (!currentUserEmail) return 'Please connect your Gmail account first.';
+  if (!els.recipientEmail.value.trim()) return 'Recipient email is missing.';
+  if (!EMAIL_PATTERN.test(els.recipientEmail.value.trim())) return 'Recipient email does not look valid.';
+  if (!els.companyName.value.trim()) return 'Company name is missing.';
+  if (!els.emailSubject.value.trim()) return 'Subject is missing.';
+  if (!els.emailTemplate.value.trim()) return 'The email text is empty.';
   return null;
 }
 
@@ -195,19 +240,6 @@ async function ensureFreshToken() {
   const token = await getAuthToken(true);
   currentToken = token;
   return token;
-}
-
-async function buildAttachmentFromSettings(settings) {
-  if (!settings.cvData || !settings.cvName) {
-    return null;
-  }
-  const commaIndex = settings.cvData.indexOf(',');
-  const base64Data = commaIndex >= 0 ? settings.cvData.substring(commaIndex + 1) : settings.cvData;
-  return {
-    fileName: settings.cvName,
-    mimeType: 'application/pdf',
-    base64Data
-  };
 }
 
 async function handleSend() {
@@ -218,37 +250,52 @@ async function handleSend() {
     return;
   }
 
-  const settings = await getSettings();
-  if (!settings.cvName) {
-    showNotification('CV is not configured. Add it in Settings.', 'error');
-    return;
-  }
-
-  const blocked = historyBlock((await getSentHistory())[normalizeEmail(els.recipientEmail.value)]);
-  if (blocked) {
-    showNotification(`${blocked.error}. Email was NOT sent.`.replace('.. ', '. '), 'error');
-    return;
-  }
-
   els.sendBtn.disabled = true;
   els.sendBtn.textContent = 'Sending...';
   try {
-    const token = await ensureFreshToken();
-    const attachment = await buildAttachmentFromSettings(settings);
-    const bodyText = buildSinglePreviewText(settings.senderName || '');
+    const settings = await getSettingsResolved();
+    const blocked = historyBlock((await getSentHistory())[normalizeEmail(els.recipientEmail.value)]);
+    if (blocked) {
+      showNotification(`${blocked.error} Email was NOT sent.`.replace('.. ', '. '), 'error');
+      return;
+    }
+    if (settings.dailyLimit > 0 && (await getSentToday()) >= settings.dailyLimit) {
+      showNotification(`Daily limit of ${settings.dailyLimit} reached. Change it in Settings if you want to send more today.`, 'error');
+      return;
+    }
+    const vars = singleVariables(settings);
+    const missing = findMissingPlaceholders(`${els.emailSubject.value}\n${els.emailTemplate.value}`, vars);
+    if (missing.length) {
+      showNotification(`Missing field: ${missing.join(', ')}. Add it in Extra fields.`, 'error');
+      return;
+    }
+    const { cv, error } = selectedCv(settings, els.singleCvSelect);
+    if (error) {
+      showNotification(error, 'error');
+      return;
+    }
 
-    await sendEmailWithRetry({
+    const token = await ensureFreshToken();
+    const subject = renderTemplate(els.emailSubject.value, vars).trim();
+    const result = await sendEmailWithRetry({
       token,
       fromEmail: currentUserEmail,
       senderName: settings.senderName,
       toEmail: els.recipientEmail.value.trim(),
-      subject: els.emailSubject.value.trim(),
-      bodyText,
-      attachment
+      subject,
+      bodyText: renderTemplate(els.emailTemplate.value, vars),
+      attachment: attachmentFromCv(cv)
     });
 
-    await addSentRecord(els.recipientEmail.value, els.companyName.value.trim());
-    refreshHistoryCount();
+    await addSentRecord(els.recipientEmail.value, els.companyName.value.trim(), {
+      threadId: result.data && result.data.threadId,
+      messageId: result.data && result.data.id,
+      subject,
+      template: els.singleTemplateSelect.value,
+      cv: cv ? cv.name : 'none'
+    });
+    await bumpSentToday();
+    refreshHistoryPanel();
     showNotification('Email sent successfully.', 'success');
   } catch (err) {
     showNotification(err.message || 'Unable to send email. Please check Gmail permissions.', 'error');
@@ -257,6 +304,61 @@ async function handleSend() {
     els.sendBtn.textContent = 'Send Email';
   }
 }
+
+// Sends an email to YOUR OWN address so you can check wording, CV and layout. Not saved to history.
+async function sendTestEmail({ subject, bodyText, cv, settings }) {
+  const token = await ensureFreshToken();
+  await sendEmailWithRetry({
+    token,
+    fromEmail: currentUserEmail,
+    senderName: settings.senderName,
+    toEmail: currentUserEmail,
+    subject: `[TEST] ${subject}`,
+    bodyText,
+    attachment: attachmentFromCv(cv)
+  });
+  await bumpSentToday();
+  showNotification(`Test email sent to ${currentUserEmail}. Check your inbox.`, 'success');
+}
+
+async function handleSingleTest() {
+  clearNotification();
+  if (!currentUserEmail) {
+    showNotification('Please connect your Gmail account first.', 'error');
+    return;
+  }
+  els.testSendBtn.disabled = true;
+  try {
+    const settings = await getSettingsResolved();
+    const vars = singleVariables(settings);
+    if (!vars.company) vars.company = 'Test Company';
+    if (!vars.email) vars.email = currentUserEmail;
+    const missing = findMissingPlaceholders(`${els.emailSubject.value}\n${els.emailTemplate.value}`, vars);
+    if (missing.length) {
+      showNotification(`Missing field: ${missing.join(', ')}. Add it in Extra fields.`, 'error');
+      return;
+    }
+    const { cv, error } = selectedCv(settings, els.singleCvSelect);
+    if (error) {
+      showNotification(error, 'error');
+      return;
+    }
+    await sendTestEmail({
+      subject: renderTemplate(els.emailSubject.value, vars),
+      bodyText: renderTemplate(els.emailTemplate.value, vars),
+      cv,
+      settings
+    });
+  } catch (err) {
+    showNotification(err.message || 'Unable to send the test email.', 'error');
+  } finally {
+    els.testSendBtn.disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Bulk: preview table                                                 */
+/* ------------------------------------------------------------------ */
 
 const STATUS_CLASS = {
   'Pending': 'pending',
@@ -269,7 +371,7 @@ const STATUS_CLASS = {
 };
 
 function pillText(entry) {
-  if (!entry.error) return entry.status;
+  if (!entry.error) return entry.status === 'Pending' ? 'Ready' : entry.status;
   return entry.status === 'Failed' ? `Failed: ${entry.error}` : entry.error;
 }
 
@@ -280,67 +382,40 @@ function buildPill(entry) {
   return pill;
 }
 
-function renderBulkTable() {
+function renderPreviewTable() {
   els.bulkTableBody.innerHTML = '';
   const fragment = document.createDocumentFragment();
-  bulkEntries.forEach((entry, index) => {
+  previewEntries.forEach((entry, index) => {
     const row = document.createElement('tr');
-
     const companyCell = document.createElement('td');
     companyCell.textContent = entry.company || '(missing)';
-
     const emailCell = document.createElement('td');
     emailCell.textContent = entry.email || '(missing)';
-
     const statusCell = document.createElement('td');
     statusCell.appendChild(buildPill(entry));
-
-    row.appendChild(companyCell);
-    row.appendChild(emailCell);
-    row.appendChild(statusCell);
+    row.append(companyCell, emailCell, statusCell);
     row.dataset.index = String(index);
     fragment.appendChild(row);
   });
   els.bulkTableBody.appendChild(fragment);
 }
 
-function updateEntryStatus(index, status, error) {
-  const entry = bulkEntries[index];
-  entry.status = status;
-  entry.error = error || null;
-  const row = els.bulkTableBody.querySelector(`tr[data-index="${index}"]`);
-  if (!row) return;
-  const statusCell = row.children[2];
-  statusCell.innerHTML = '';
-  statusCell.appendChild(buildPill(entry));
-  if (status === 'Sending...') {
-    row.scrollIntoView({ block: 'nearest' });
-  }
-}
-
-function countByStatus() {
-  const counts = { total: bulkEntries.length, Pending: 0, Sent: 0, Failed: 0, 'Already sent': 0, Bounced: 0, Duplicate: 0 };
-  bulkEntries.forEach((entry) => {
-    const key = entry.status === 'Sending...' ? 'Pending' : entry.status;
-    counts[key] = (counts[key] || 0) + 1;
-  });
-  return counts;
-}
-
 function updateSummary() {
-  const c = countByStatus();
+  const c = { Pending: 0, Failed: 0, 'Already sent': 0, Bounced: 0, Duplicate: 0 };
+  previewEntries.forEach((e) => {
+    c[e.status] = (c[e.status] || 0) + 1;
+  });
   const chips = [
-    [`${c.total} in list`, 'status-duplicate'],
-    [`${c.Pending} to send`, 'status-pending'],
-    [`${c.Sent} sent`, 'status-sent'],
-    [`${c['Already sent']} already sent`, 'status-already'],
-    [`${c.Bounced} bounced before`, 'status-bounced'],
-    [`${c.Duplicate} duplicate`, 'status-duplicate'],
-    [`${c.Failed} failed / invalid`, 'status-failed']
-  ].filter(([label]) => !label.startsWith('0 ') || label.endsWith('in list'));
-
+    [`${previewEntries.length} in list`, 'status-duplicate', true],
+    [`${c.Pending} to send`, 'status-pending', c.Pending > 0],
+    [`${c['Already sent']} already sent`, 'status-already', c['Already sent'] > 0],
+    [`${c.Bounced} bounced before`, 'status-bounced', c.Bounced > 0],
+    [`${c.Duplicate} duplicate`, 'status-duplicate', c.Duplicate > 0],
+    [`${c.Failed} won't send`, 'status-failed', c.Failed > 0]
+  ];
   els.bulkSummary.innerHTML = '';
-  chips.forEach(([label, cls]) => {
+  chips.forEach(([label, cls, show]) => {
+    if (!show) return;
     const chip = document.createElement('span');
     chip.className = `chip ${cls}`;
     chip.textContent = label;
@@ -349,47 +424,82 @@ function updateSummary() {
   els.bulkSummary.classList.remove('hidden');
 }
 
-function pendingCount() {
-  return bulkEntries.filter((entry) => entry.status === 'Pending').length;
+function pendingPreviewCount() {
+  return previewEntries.filter((e) => e.status === 'Pending').length;
+}
+
+function clearPreview() {
+  previewEntries = [];
+  previewRun++;
+  verifying = false;
+  els.bulkTableWrap.classList.add('hidden');
+  els.bulkSummary.classList.add('hidden');
+  els.verifyProgress.textContent = '';
+  els.sendAllBtn.disabled = true;
 }
 
 async function previewFromText(text) {
   clearNotification();
-  els.bulkProgress.classList.add('hidden');
+  const run = ++previewRun;
+  els.verifyProgress.textContent = '';
 
   let history = {};
+  let settings;
   try {
     history = await getSentHistory();
+    settings = await getSettingsResolved();
   } catch (err) {
-    history = {};
-  }
-
-  try {
-    bulkEntries = parseBulkJson(text, history);
-  } catch (err) {
-    bulkEntries = [];
     showNotification(err.message, 'error');
-    els.bulkTableWrap.classList.add('hidden');
-    els.bulkSummary.classList.add('hidden');
-    els.sendAllBtn.disabled = true;
     return;
   }
 
-  if (bulkEntries.length === 0) {
+  let entries;
+  try {
+    entries = parseBulkJson(text, history);
+  } catch (err) {
+    clearPreview();
+    showNotification(err.message, 'error');
+    return;
+  }
+  if (entries.length === 0) {
+    clearPreview();
     showNotification('The JSON list is empty.', 'error');
-    els.bulkTableWrap.classList.add('hidden');
-    els.bulkSummary.classList.add('hidden');
-    els.sendAllBtn.disabled = true;
     return;
   }
 
-  renderBulkTable();
+  resolveBulkEntries(entries, settings, { template: els.bulkTemplateSelect.value, cv: els.bulkCvSelect.value });
+  previewEntries = entries;
+  renderPreviewTable();
   updateSummary();
   els.bulkTableWrap.classList.remove('hidden');
-  els.sendAllBtn.disabled = pendingCount() === 0;
+  els.sendAllBtn.disabled = true; // enabled once the address check has finished
 
-  if (pendingCount() === 0) {
-    showNotification('Nothing to send: every entry is already sent, bounced, a duplicate, or invalid.', 'info');
+  if (els.verifyDomainsCheck.checked && pendingPreviewCount() > 0) {
+    verifying = true;
+    els.verifyProgress.textContent = 'Checking domains...';
+    try {
+      const cache = await getDnsCache();
+      await verifyEntries(entries, {
+        cache,
+        onProgress: (done, total) => {
+          if (run === previewRun) els.verifyProgress.textContent = `Checking domains: ${done} / ${total}`;
+        }
+      });
+      await setDnsCache(cache);
+    } catch (err) {
+      /* a failed check never blocks sending */
+    }
+    if (run !== previewRun) return; // a newer preview took over
+    verifying = false;
+    renderPreviewTable();
+    updateSummary();
+    const flagged = entries.filter((e) => e.status === 'Failed' && /domain|typo/i.test(e.error || '')).length;
+    els.verifyProgress.textContent = flagged ? `Domain check: ${flagged} address(es) will not be sent.` : 'Domain check: all good.';
+  }
+
+  els.sendAllBtn.disabled = pendingPreviewCount() === 0;
+  if (pendingPreviewCount() === 0) {
+    showNotification('Nothing to send: every entry is already sent, bounced, a duplicate, or cannot be sent.', 'info');
   }
 }
 
@@ -410,333 +520,228 @@ async function handleBulkFileChange() {
   }
 }
 
-/* ---- delay between sends (worker timer, so background tabs are not throttled) ---- */
-
-let timerWorker = null;
-let timerSeq = 0;
-const timerResolvers = new Map();
-
-function getTimerWorker() {
-  if (timerWorker !== null) return timerWorker;
+async function handleBulkTest() {
+  clearNotification();
+  if (!currentUserEmail) {
+    showNotification('Please connect your Gmail account first.', 'error');
+    return;
+  }
+  const entry = previewEntries.find((e) => e.status === 'Pending');
+  if (!entry) {
+    showNotification('Preview a list first. The test uses the first email that is ready to send.', 'error');
+    return;
+  }
+  els.bulkTestBtn.disabled = true;
   try {
-    timerWorker = new Worker('timer-worker.js');
-    timerWorker.onmessage = (event) => {
-      const resolve = timerResolvers.get(event.data.id);
-      if (resolve) {
-        timerResolvers.delete(event.data.id);
-        resolve();
-      }
-    };
+    const settings = await getSettingsResolved();
+    const template = findByName(settings.templates, entry.template);
+    const cv = entry.cv === 'none' ? null : findByName(settings.cvs, entry.cv);
+    const vars = { ...entry.fields, company: entry.company, name: settings.senderName || '', email: entry.email };
+    await sendTestEmail({
+      subject: renderTemplate(template.subject, vars),
+      bodyText: renderTemplate(template.body, vars),
+      cv,
+      settings
+    });
   } catch (err) {
-    timerWorker = false;
-  }
-  return timerWorker;
-}
-
-function workerSleep(ms) {
-  const worker = getTimerWorker();
-  if (!worker) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-  return new Promise((resolve) => {
-    const id = ++timerSeq;
-    timerResolvers.set(id, resolve);
-    worker.postMessage({ id, ms });
-  });
-}
-
-// Sleeps in short steps so the Stop button reacts quickly.
-async function interruptibleSleep(totalMs) {
-  let waited = 0;
-  while (waited < totalMs && !stopRequested) {
-    const chunk = Math.min(500, totalMs - waited);
-    await workerSleep(chunk);
-    waited += chunk;
+    showNotification(err.message || 'Unable to send the test email.', 'error');
+  } finally {
+    els.bulkTestBtn.disabled = false;
   }
 }
 
-function openConfirmModal() {
-  const pending = pendingCount();
-  const skipped = bulkEntries.length - pending;
-  els.confirmModalText.textContent =
-    `This will send ${pending} email(s)` +
-    (skipped ? ` and skip ${skipped} (already sent, bounced, duplicate or invalid)` : '') +
-    '. Continue?';
+/* ------------------------------------------------------------------ */
+/* Confirm dialog + start sending                                      */
+/* ------------------------------------------------------------------ */
 
-  getSettings().then((settings) => {
-    const delay = Number(settings.sendDelaySeconds) || 5;
-    const minutes = Math.ceil((pending * delay) / 60);
-    let warn = `Estimated time: about ${minutes} minute(s). Keep this window open.`;
-    if (pending > 400) {
-      warn +=
-        ' A personal Gmail account can send roughly 500 emails per day. If Gmail\'s limit is hit, sending stops by itself — ' +
-        'paste the same list again later and anyone already sent is skipped automatically.';
-    }
-    els.confirmModalWarn.textContent = warn;
-    els.confirmModalWarn.classList.remove('hidden');
-  });
+function openConfirm({ title, text, warn, confirmLabel, onConfirm }) {
+  els.confirmModalTitle.textContent = title;
+  els.confirmModalText.textContent = text;
+  els.confirmModalWarn.textContent = warn || '';
+  els.confirmModalWarn.classList.toggle('hidden', !warn);
+  els.confirmSendBtn.textContent = confirmLabel;
+  confirmAction = onConfirm;
   els.confirmModal.classList.remove('hidden');
 }
 
 function closeConfirmModal() {
   els.confirmModal.classList.add('hidden');
+  confirmAction = null;
 }
 
-function setBulkRunning(running) {
-  bulkRunning = running;
-  els.sendAllBtn.disabled = running || pendingCount() === 0;
-  els.validateJsonBtn.disabled = running;
-  els.bulkJsonFile.disabled = running;
-  els.stopBtn.classList.toggle('hidden', !running);
-  els.stopBtn.disabled = false;
-  els.stopBtn.textContent = 'Stop';
-  window.onbeforeunload = running
-    ? (event) => {
-        event.preventDefault();
-        event.returnValue = '';
-      }
-    : null;
+function describeDuration(count, settings) {
+  const avgSeconds = (settings.delayMin + settings.delayMax) / 2;
+  const totalMinutes = Math.ceil((count * avgSeconds) / 60);
+  const days = settings.dailyLimit > 0 ? Math.ceil(count / settings.dailyLimit) : 1;
+  const time = totalMinutes >= 90 ? `about ${(totalMinutes / 60).toFixed(1)} hours` : `about ${totalMinutes} minute(s)`;
+  let text = `Sending takes ${time} in total`;
+  if (days > 1) text += `, spread over ${days} days because of your daily limit of ${settings.dailyLimit}`;
+  return `${text}. It runs in the background: you can close this window, but Chrome itself must stay open.`;
 }
 
-function handleStop() {
-  stopRequested = true;
-  els.stopBtn.disabled = true;
-  els.stopBtn.textContent = 'Stopping...';
+async function handleStartClick() {
+  const pending = pendingPreviewCount();
+  if (pending === 0 || verifying) return;
+  const settings = await getSettingsResolved();
+  const skipped = previewEntries.length - pending;
+  openConfirm({
+    title: 'Start sending?',
+    text:
+      `This will queue ${pending} email(s)` +
+      (skipped ? ` and skip ${skipped} (already sent, bounced, duplicate or cannot be sent)` : '') +
+      '.',
+    warn: describeDuration(pending, settings),
+    confirmLabel: 'Start sending',
+    onConfirm: startSending
+  });
 }
 
-async function runBulkSend() {
+async function startSending() {
   closeConfirmModal();
   clearNotification();
-
   if (!currentUserEmail) {
     showNotification('Please connect your Gmail account first.', 'error');
     return;
   }
-
-  const settings = await getSettings();
-  if (!settings.cvName) {
-    showNotification('CV is not configured. Add it in Settings.', 'error');
-    return;
-  }
-
-  const attachment = await buildAttachmentFromSettings(settings);
-  const delaySeconds = Number(settings.sendDelaySeconds) || 5;
-  const subject = els.emailSubject.value.trim() || settings.defaultSubject;
-  const template = els.emailTemplate.value || settings.defaultTemplate;
-
-  stopRequested = false;
-  setBulkRunning(true);
-
-  let token;
+  const jobs = previewEntries
+    .filter((e) => e.status === 'Pending')
+    .map((e) => ({ kind: 'new', email: e.email, company: e.company, fields: e.fields, template: e.template, cv: e.cv }));
   try {
-    token = await ensureFreshToken();
-  } catch (err) {
-    showNotification(err.message || 'Please connect your Gmail account first.', 'error');
-    setBulkRunning(false);
-    return;
-  }
-
-  const queue = [];
-  bulkEntries.forEach((entry, index) => {
-    if (entry.status === 'Pending') queue.push(index);
-  });
-
-  let sentCount = 0;
-  let failedCount = 0;
-  let skippedCount = 0;
-  let stopReason = '';
-  let processed = 0;
-
-  els.bulkProgress.classList.remove('hidden');
-  els.bulkProgressBar.style.width = '0%';
-
-  for (let q = 0; q < queue.length; q++) {
-    if (stopRequested) {
-      stopReason = 'stopped';
-      break;
-    }
-
-    const i = queue[q];
-    const entry = bulkEntries[i];
-
-    // Re-check right before sending: protects against a second window or a history import.
-    let latest = {};
-    try {
-      latest = await getSentHistory();
-    } catch (err) {
-      latest = {};
-    }
-    const blocked = historyBlock(latest[normalizeEmail(entry.email)]);
-    if (blocked) {
-      updateEntryStatus(i, blocked.status, blocked.error);
-      skippedCount++;
-      processed++;
-      continue;
-    }
-
-    updateEntryStatus(i, 'Sending...');
-    let sendOk = false;
-    try {
-      const bodyText = renderTemplate(template, {
-        company: entry.company,
-        name: settings.senderName || '',
-        email: entry.email
-      });
-
-      const result = await sendEmailWithRetry({
-        token,
-        fromEmail: currentUserEmail,
-        senderName: settings.senderName,
-        toEmail: entry.email,
-        subject,
-        bodyText,
-        attachment
-      });
-      token = result.token;
-      sendOk = true;
-    } catch (err) {
-      if (err.isQuota) {
-        updateEntryStatus(i, 'Pending');
-        stopReason = 'quota';
-        showNotification(`${err.message} Stopped. Try again later; already-sent emails will be skipped.`, 'error');
-        break;
-      }
-      updateEntryStatus(i, 'Failed', err.message || 'Unknown error');
-      failedCount++;
-    }
-
-    if (sendOk) {
-      // Save immediately so the email can never be sent twice, even if the window closes next.
-      try {
-        await addSentRecord(entry.email, entry.company);
-      } catch (err) {
-        showNotification('Email sent, but saving it to history failed: ' + err.message, 'error');
-      }
-      updateEntryStatus(i, 'Sent');
-      sentCount++;
-      refreshHistoryCount();
-    }
-
-    processed++;
-    els.bulkProgressBar.style.width = `${Math.round((processed / queue.length) * 100)}%`;
-    updateSummary();
-
-    if (q < queue.length - 1 && !stopRequested) {
-      await interruptibleSleep(delaySeconds * 1000);
-    }
-  }
-
-  updateSummary();
-  setBulkRunning(false);
-
-  const parts = [`${sentCount} sent`];
-  if (failedCount) parts.push(`${failedCount} failed`);
-  if (skippedCount) parts.push(`${skippedCount} skipped (already sent / bounced)`);
-  const remaining = pendingCount();
-
-  if (stopReason === 'quota') {
-    // notification already shown above
-  } else if (stopReason === 'stopped') {
-    showNotification(`Stopped. ${parts.join(', ')}. ${remaining} still pending.`, 'info');
-  } else {
-    showNotification(`Bulk send complete. ${parts.join(', ')}.`, 'success');
-  }
-
-  if (sentCount > 0 && settings.autoExportHistory) {
-    await downloadHistoryFile();
-  }
-}
-
-/* ---- bounces ---- */
-
-const BOUNCE_QUERY = 'from:(mailer-daemon OR postmaster)';
-
-async function finishBounceUpdate(bounces) {
-  const newly = await markBounced(bounces);
-  await refreshHistoryCount();
-  applyHistoryToEntries(await getSentHistory());
-  return newly;
-}
-
-async function handleCheckBounces() {
-  clearNotification();
-  if (bulkRunning) {
-    showNotification('Wait until the bulk send has finished (or press Stop) before checking bounces.', 'error');
-    return;
-  }
-  if (!currentUserEmail) {
-    showNotification('Please connect your Gmail account first.', 'error');
-    return;
-  }
-
-  els.checkBouncesBtn.disabled = true;
-  els.bounceProgress.textContent = 'Looking for bounce notices in Gmail...';
-  try {
-    const history = await getSentHistory();
-    const last = await getLastBounceCheck();
-    // Look back to one day before the last check (or 60 days the first time).
-    const since = last ? `after:${Math.floor(last / 1000) - 86400}` : 'newer_than:60d';
-    const startedAt = Date.now();
-
-    const token = await getAuthToken(true);
-    const result = await scanBounces({
-      token,
-      query: `${BOUNCE_QUERY} ${since}`,
-      knownEmails: history,
-      onProgress: (done, total) => {
-        els.bounceProgress.textContent = `Reading bounce notices: ${done} / ${total}`;
-      }
-    });
-    currentToken = result.token;
-
-    const newly = await finishBounceUpdate(result.bounces);
-    await setLastBounceCheck(startedAt);
-    els.bounceProgress.textContent = '';
+    const result = await enqueueJobs(jobs);
+    kickWorker();
+    clearPreview();
+    els.bulkJsonInput.value = '';
+    els.bulkJsonFile.value = '';
+    els.bulkInputInfo.textContent = 'Queued. You can paste another list at any time; it is added to the queue.';
     showNotification(
-      newly > 0
-        ? `Found ${newly} new bounced address(es). They are marked and will not be emailed again.`
-        : `No new bounces found (checked ${result.scanned} notice(s)). Bounces can take a few minutes to arrive.`,
-      newly > 0 ? 'success' : 'info'
+      `Queued ${result.added} email(s)${result.duplicates ? ` (${result.duplicates} already waiting)` : ''}. Sending continues in the background.`,
+      'success'
     );
+    renderQueueCard();
   } catch (err) {
-    els.bounceProgress.textContent = '';
-    showNotification(err.message || 'Unable to check for bounces.', 'error');
-  } finally {
-    els.checkBouncesBtn.disabled = false;
+    showNotification(err.message || 'Unable to start sending.', 'error');
   }
 }
 
-async function handleMarkBounced() {
-  clearNotification();
-  if (bulkRunning) {
-    showNotification('Wait until the bulk send has finished before marking bounces.', 'error');
+/* ------------------------------------------------------------------ */
+/* Queue card                                                          */
+/* ------------------------------------------------------------------ */
+
+async function renderQueueCard() {
+  const [items, meta, settings, sentToday] = await Promise.all([
+    getQueueItems(),
+    getQueueMeta(),
+    getSettingsResolved(),
+    getSentToday()
+  ]);
+  const c = countQueue(items);
+  if (c.total === 0) {
+    els.queueCard.classList.add('hidden');
     return;
   }
-  const found = els.manualBounceInput.value.match(/[^\s<>()"',;:]+@[^\s<>()"',;:]+\.[^\s<>()"',;:]+/g) || [];
-  const emails = [...new Set(found.map((e) => normalizeEmail(e.replace(/\.+$/, ''))))];
-  if (emails.length === 0) {
-    showNotification('No email addresses found in what you pasted.', 'error');
-    return;
+  els.queueCard.classList.remove('hidden');
+
+  const waiting = c.pending + c.sending;
+  const done = c.sent + c.failed + c.skipped + c.cancelled;
+  let state;
+  if (meta.state === 'paused') {
+    state = 'Paused';
+  } else if (meta.state === 'running' && waiting > 0) {
+    if (meta.waitReason === 'limit') state = `Daily limit reached (${sentToday}/${settings.dailyLimit}). Continues tomorrow`;
+    else if (meta.waitReason === 'quota') state = `Gmail limit reached. Retrying at ${new Date(meta.nextSendAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    else if (meta.nextSendAt > Date.now()) state = `Sending: next email in ${Math.ceil((meta.nextSendAt - Date.now()) / 1000)}s`;
+    else state = 'Sending...';
+  } else {
+    state = waiting > 0 ? 'Stopped' : 'Finished';
   }
-  try {
-    const newly = await finishBounceUpdate(emails.map((email) => ({ email, reason: 'address_not_found' })));
-    els.manualBounceInput.value = '';
-    showNotification(`Marked ${newly} address(es) as bounced (${emails.length - newly} were already marked).`, 'success');
-  } catch (err) {
-    showNotification(err.message || 'Unable to save.', 'error');
-  }
+  els.queueStateText.textContent = state;
+
+  const parts = [`${c.sent} sent`, `${waiting} waiting`];
+  if (c.failed) parts.push(`${c.failed} failed`);
+  if (c.skipped) parts.push(`${c.skipped} skipped`);
+  if (c.cancelled) parts.push(`${c.cancelled} cancelled`);
+  els.queueCountsText.textContent = parts.join(' · ');
+  els.queueProgressBar.style.width = `${Math.round((done / c.total) * 100)}%`;
+
+  const notes = [`Today: ${sentToday}${settings.dailyLimit > 0 ? ` / ${settings.dailyLimit}` : ''} emails sent.`];
+  if (meta.lastError) notes.push(meta.lastError);
+  els.queueNote.textContent = notes.join(' ');
+
+  els.pauseBtn.classList.toggle('hidden', meta.state !== 'running' || waiting === 0);
+  els.resumeBtn.classList.toggle('hidden', !(waiting > 0 && meta.state !== 'running'));
+  els.cancelQueueBtn.classList.toggle('hidden', waiting === 0);
 }
 
-/* ---- history tab ---- */
+async function handlePause() {
+  await pauseQueue();
+  renderQueueCard();
+}
 
-async function refreshHistoryCount() {
+async function handleResume() {
+  await resumeQueue();
+  kickWorker();
+  renderQueueCard();
+}
+
+async function handleCancelQueue() {
+  const items = await getQueueItems();
+  const c = countQueue(items);
+  openConfirm({
+    title: 'Cancel remaining emails?',
+    text: `${c.pending + c.sending} email(s) that have not been sent yet will be cancelled. Emails already sent are not affected.`,
+    confirmLabel: 'Cancel remaining',
+    onConfirm: async () => {
+      closeConfirmModal();
+      await cancelRemaining();
+      renderQueueCard();
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* History tab                                                         */
+/* ------------------------------------------------------------------ */
+
+async function refreshHistoryPanel() {
   try {
-    const records = Object.values(await getSentHistory());
+    const [history, settings, items, meta] = await Promise.all([getSentHistory(), getSettingsResolved(), getQueueItems(), getQueueMeta()]);
+    const records = Object.values(history);
     els.historyCount.textContent = String(records.length);
     els.historyCountBadge.textContent = String(records.length);
     els.bouncedCount.textContent = String(records.filter((r) => r.status === 'bounced').length);
+    els.repliedCount.textContent = String(records.filter((r) => r.repliedAt).length);
+
+    const due = buildFollowUpJobs(history, settings, items, Date.now());
+    els.followUpInfo.textContent = due.length
+      ? `${due.length} contact(s) have not replied after ${settings.followUpDays}+ days. Follow-ups are sent in the same Gmail thread (max ${settings.maxFollowUps} each).`
+      : `Nothing due. A follow-up becomes due ${settings.followUpDays} days after sending if there is no reply.`;
+    els.queueFollowUpsBtn.disabled = due.length === 0 || settings.maxFollowUps === 0;
+    els.queueFollowUpsBtn.textContent = due.length ? `Queue ${due.length} follow-up(s)` : 'Queue follow-ups';
+
+    els.syncInfo.textContent = meta.lastSyncAt ? `Last synced: ${new Date(meta.lastSyncAt).toLocaleString()}` : 'Not synced yet.';
   } catch (err) {
     /* ignore */
+  }
+}
+
+// Re-checks the open preview against history (after an import, a bounce check or a sync).
+async function applyHistoryToPreview() {
+  if (previewEntries.length === 0) return;
+  const history = await getSentHistory();
+  let changed = 0;
+  previewEntries.forEach((entry) => {
+    if (entry.status !== 'Pending') return;
+    const blocked = historyBlock(history[normalizeEmail(entry.email)]);
+    if (blocked) {
+      entry.status = blocked.status;
+      entry.error = blocked.error;
+      changed++;
+    }
+  });
+  if (changed) {
+    renderPreviewTable();
+    updateSummary();
+    els.sendAllBtn.disabled = verifying || pendingPreviewCount() === 0;
   }
 }
 
@@ -754,7 +759,7 @@ function downloadJsonFile(data, filename) {
 
 async function downloadHistoryFile() {
   const history = await getSentHistory();
-  const stamp = new Date().toISOString().slice(0, 10);
+  const stamp = todayKey();
   downloadJsonFile(buildHistoryExport(history), `job-mailer-sent-history-${stamp}.json`);
 }
 
@@ -773,28 +778,6 @@ async function handleExportHistory() {
   }
 }
 
-// Re-checks the current list against history (after an import or a bounce check).
-function applyHistoryToEntries(history) {
-  let changed = 0;
-  bulkEntries.forEach((entry, index) => {
-    if (entry.status === 'Failed' || entry.status === 'Duplicate' || entry.status === 'Sending...') return;
-    const blocked = historyBlock(history[normalizeEmail(entry.email)]);
-    if (!blocked) return;
-    // A "Sent" row that later bounced becomes "Bounced"; pending rows become skipped.
-    const worthUpdating =
-      (blocked.status === 'Bounced' && entry.status !== 'Bounced') ||
-      (blocked.status === 'Already sent' && entry.status === 'Pending');
-    if (worthUpdating) {
-      updateEntryStatus(index, blocked.status, blocked.error);
-      changed++;
-    }
-  });
-  if (changed && bulkEntries.length) {
-    updateSummary();
-    els.sendAllBtn.disabled = bulkRunning || pendingCount() === 0;
-  }
-}
-
 async function handleImportHistory() {
   clearNotification();
   const file = els.importHistoryFile.files[0];
@@ -806,10 +789,10 @@ async function handleImportHistory() {
       return;
     }
     const result = await mergeSentHistory(records);
-    await refreshHistoryCount();
-    applyHistoryToEntries(await getSentHistory());
+    await refreshHistoryPanel();
+    await applyHistoryToPreview();
     showNotification(
-      `Loaded ${records.length} record(s): ${result.added} new, ${result.updated} updated to bounced, ${result.skipped} already known. History now has ${result.total}.`,
+      `Loaded ${records.length} record(s): ${result.added} new, ${result.updated} updated, ${result.skipped} already known. History now has ${result.total}.`,
       'success'
     );
   } catch (err) {
@@ -830,8 +813,117 @@ async function handleClearHistory() {
   );
   if (!ok) return;
   await clearSentHistory();
-  await refreshHistoryCount();
+  await refreshHistoryPanel();
   showNotification('History cleared.', 'info');
+}
+
+async function handleCheckBounces() {
+  clearNotification();
+  if (!currentUserEmail) {
+    showNotification('Please connect your Gmail account first.', 'error');
+    return;
+  }
+  els.checkBouncesBtn.disabled = true;
+  els.bounceProgress.textContent = 'Looking for bounce notices and replies in Gmail...';
+  try {
+    const token = await getAuthToken(true);
+    const result = await runChecks(token, (text) => {
+      els.bounceProgress.textContent = text;
+    });
+    els.bounceProgress.textContent = '';
+    await refreshHistoryPanel();
+    await applyHistoryToPreview();
+    const found = [];
+    if (result.bounced) found.push(`${result.bounced} new bounce(s)`);
+    if (result.replied) found.push(`${result.replied} new repl${result.replied === 1 ? 'y' : 'ies'}`);
+    showNotification(
+      found.length
+        ? `Found ${found.join(' and ')}.`
+        : 'Nothing new. Bounces can take a few minutes to arrive. Replies from a different address than the one you wrote to are only found for emails sent with version 1.3 or later.',
+      found.length ? 'success' : 'info'
+    );
+  } catch (err) {
+    els.bounceProgress.textContent = '';
+    showNotification(err.message || 'Unable to check Gmail.', 'error');
+  } finally {
+    els.checkBouncesBtn.disabled = false;
+  }
+}
+
+async function handleMarkBounced() {
+  clearNotification();
+  const found = els.manualBounceInput.value.match(/[^\s<>()"',;:]+@[^\s<>()"',;:]+\.[^\s<>()"',;:]+/g) || [];
+  const emails = [...new Set(found.map((e) => normalizeEmail(e.replace(/\.+$/, ''))))];
+  if (emails.length === 0) {
+    showNotification('No email addresses found in what you pasted.', 'error');
+    return;
+  }
+  try {
+    const newly = await markBounced(emails.map((email) => ({ email, reason: 'address_not_found' })));
+    els.manualBounceInput.value = '';
+    await refreshHistoryPanel();
+    await applyHistoryToPreview();
+    showNotification(`Marked ${newly} address(es) as bounced (${emails.length - newly} were already marked).`, 'success');
+  } catch (err) {
+    showNotification(err.message || 'Unable to save.', 'error');
+  }
+}
+
+async function handleQueueFollowUps() {
+  clearNotification();
+  if (!currentUserEmail) {
+    showNotification('Please connect your Gmail account first.', 'error');
+    return;
+  }
+  const [history, settings, items] = await Promise.all([getSentHistory(), getSettingsResolved(), getQueueItems()]);
+  const jobs = buildFollowUpJobs(history, settings, items, Date.now());
+  if (jobs.length === 0) {
+    showNotification('No follow-ups are due.', 'info');
+    return;
+  }
+  openConfirm({
+    title: 'Send follow-ups?',
+    text: `${jobs.length} follow-up email(s) will be queued. Anyone who has replied or bounced is skipped automatically.`,
+    warn: describeDuration(jobs.length, settings),
+    confirmLabel: 'Queue follow-ups',
+    onConfirm: async () => {
+      closeConfirmModal();
+      const result = await enqueueJobs(jobs);
+      kickWorker();
+      showNotification(`Queued ${result.added} follow-up(s). Sending continues in the background.`, 'success');
+      switchTab('bulk');
+    }
+  });
+}
+
+async function handleSync() {
+  clearNotification();
+  if (!currentUserEmail) {
+    showNotification('Please connect your Gmail account first.', 'error');
+    return;
+  }
+  els.syncBtn.disabled = true;
+  els.syncInfo.textContent = 'Syncing...';
+  try {
+    const result = await syncHistoryWithDrive(true);
+    await patchQueueMeta({ lastSyncAt: result.at });
+    await refreshHistoryPanel();
+    await applyHistoryToPreview();
+    showNotification(`Synced. History now has ${result.total} contact(s) (${result.addedFromDrive} new from Google Drive).`, 'success');
+  } catch (err) {
+    els.syncInfo.textContent = '';
+    showNotification(err.message || 'Sync failed.', 'error');
+  } finally {
+    els.syncBtn.disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Wiring                                                              */
+/* ------------------------------------------------------------------ */
+
+function openPage(file) {
+  chrome.tabs.create({ url: chrome.runtime.getURL(file) });
 }
 
 function attachEventListeners() {
@@ -839,31 +931,68 @@ function attachEventListeners() {
   els.signOutBtn.addEventListener('click', handleSignOut);
   els.openOptionsBtn.addEventListener('click', () => chrome.runtime.openOptionsPage());
   els.openTabBtn.addEventListener('click', () => {
-    chrome.tabs.create({ url: chrome.runtime.getURL('popup.html?tab=1') });
+    openPage('popup.html?tab=1');
     window.close();
   });
+  els.openDashboardBtn.addEventListener('click', () => openPage('dashboard.html'));
+  els.openDashboardBtn2.addEventListener('click', () => openPage('dashboard.html'));
+  els.queueDashboardBtn.addEventListener('click', () => openPage('dashboard.html'));
 
-  els.tabs.forEach((tab) => {
-    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
-  });
+  els.tabs.forEach((tab) => tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
 
+  els.singleTemplateSelect.addEventListener('change', loadTemplateIntoSingleForm);
   els.previewBtn.addEventListener('click', handlePreview);
+  els.testSendBtn.addEventListener('click', handleSingleTest);
   els.sendBtn.addEventListener('click', handleSend);
 
   els.validateJsonBtn.addEventListener('click', handleValidateJson);
   els.bulkJsonFile.addEventListener('change', handleBulkFileChange);
-  els.stopBtn.addEventListener('click', handleStop);
+  els.bulkTestBtn.addEventListener('click', handleBulkTest);
+  els.sendAllBtn.addEventListener('click', handleStartClick);
+  els.pauseBtn.addEventListener('click', handlePause);
+  els.resumeBtn.addEventListener('click', handleResume);
+  els.cancelQueueBtn.addEventListener('click', handleCancelQueue);
+
+  els.confirmCancelBtn.addEventListener('click', closeConfirmModal);
+  els.confirmSendBtn.addEventListener('click', () => {
+    const action = confirmAction;
+    if (action) action();
+  });
+
   els.checkBouncesBtn.addEventListener('click', handleCheckBounces);
   els.markBouncedBtn.addEventListener('click', handleMarkBounced);
+  els.queueFollowUpsBtn.addEventListener('click', handleQueueFollowUps);
+  els.syncBtn.addEventListener('click', handleSync);
   els.exportHistoryBtn.addEventListener('click', handleExportHistory);
   els.clearHistoryBtn.addEventListener('click', handleClearHistory);
   els.importHistoryFile.addEventListener('change', handleImportHistory);
-  els.autoExportCheck.addEventListener('change', () => {
-    saveSettings({ autoExportHistory: els.autoExportCheck.checked });
+  els.autoExportCheck.addEventListener('change', () => saveSettings({ autoExportHistory: els.autoExportCheck.checked }));
+  els.verifyDomainsCheck.addEventListener('change', () => saveSettings({ verifyDomains: els.verifyDomainsCheck.checked }));
+}
+
+// Live updates: the background worker changes storage while this window is open.
+let lastFinishedBatchKey = '';
+function listenForStorageChanges() {
+  if (!chrome.storage.onChanged) return;
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area && area !== 'local') return;
+    if (changes.queueItems || changes.queueMeta || changes.sentToday) {
+      renderQueueCard();
+      maybeAutoExport();
+    }
+    if (changes.sentHistory) refreshHistoryPanel();
   });
-  els.sendAllBtn.addEventListener('click', openConfirmModal);
-  els.confirmCancelBtn.addEventListener('click', closeConfirmModal);
-  els.confirmSendBtn.addEventListener('click', runBulkSend);
+}
+
+// When a batch finishes while this window is open, optionally save the history file.
+async function maybeAutoExport() {
+  const [items, meta, settings] = await Promise.all([getQueueItems(), getQueueMeta(), getSettings()]);
+  const c = countQueue(items);
+  if (!settings.autoExportHistory || c.total === 0 || c.pending + c.sending > 0 || meta.state !== 'idle' || c.sent === 0) return;
+  const key = `${meta.startedAt || 0}:${c.sent}`;
+  if (key === lastFinishedBatchKey) return;
+  lastFinishedBatchKey = key;
+  await downloadHistoryFile();
 }
 
 async function init() {
@@ -875,10 +1004,17 @@ async function init() {
   }
   attachEventListeners();
   await refreshAuthState();
-  await loadDefaultsIntoForm();
+  await populateSelects();
+  await loadTemplateIntoSingleForm();
   const settings = await getSettings();
   els.autoExportCheck.checked = settings.autoExportHistory !== false;
-  await refreshHistoryCount();
+  els.verifyDomainsCheck.checked = settings.verifyDomains !== false;
+  await refreshHistoryPanel();
+  await renderQueueCard();
+  listenForStorageChanges();
+  queueTimer = setInterval(() => {
+    if (!els.bulkPanel.classList.contains('hidden')) renderQueueCard();
+  }, 2000);
 }
 
 document.addEventListener('DOMContentLoaded', init);

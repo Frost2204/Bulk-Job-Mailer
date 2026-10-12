@@ -8,7 +8,9 @@ function getAuthToken(interactive) {
         const message = chrome.runtime.lastError
           ? chrome.runtime.lastError.message
           : 'Google authentication was cancelled.';
-        reject(new Error(message));
+        const error = new Error(message);
+        error.isAuth = true;
+        reject(error);
         return;
       }
       resolve(token);
@@ -100,7 +102,7 @@ function foldBase64(base64String) {
   return chunks.join('\r\n');
 }
 
-function buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, attachment }) {
+function buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, attachment, inReplyTo }) {
   const boundary = `unity_job_mailer_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   const fromHeader = senderName
     ? `${senderName.replace(/"/g, '')} <${fromEmail}>`
@@ -112,6 +114,7 @@ function buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, a
     `From: ${fromHeader}`,
     `To: ${toEmail}`,
     `Subject: ${encodedSubject}`,
+    ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`, `References: ${inReplyTo}`] : []),
     'MIME-Version: 1.0',
     `Content-Type: multipart/mixed; boundary="${boundary}"`
   ].join('\r\n');
@@ -145,8 +148,8 @@ function buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, a
   return base64UrlEncode(stringToUtf8Bytes(rawMessage));
 }
 
-async function sendGmailMessage({ token, fromEmail, senderName, toEmail, subject, bodyText, attachment }) {
-  const raw = buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, attachment });
+async function sendGmailMessage({ token, fromEmail, senderName, toEmail, subject, bodyText, attachment, inReplyTo, threadId }) {
+  const raw = buildMimeMessage({ fromEmail, senderName, toEmail, subject, bodyText, attachment, inReplyTo });
 
   const response = await fetch(GMAIL_SEND_URL, {
     method: 'POST',
@@ -154,7 +157,7 @@ async function sendGmailMessage({ token, fromEmail, senderName, toEmail, subject
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ raw })
+    body: JSON.stringify(threadId ? { raw, threadId } : { raw })
   });
 
   if (response.status === 401) {
@@ -199,7 +202,7 @@ async function sendEmailWithRetry(params) {
   } catch (err) {
     if (err.message === 'TOKEN_EXPIRED') {
       await removeCachedAuthToken(params.token);
-      const freshToken = await getAuthToken(true);
+      const freshToken = await getAuthToken(params.interactive !== false);
       const data = await sendGmailMessage({ ...params, token: freshToken });
       return { data, token: freshToken };
     }
@@ -319,4 +322,130 @@ async function scanBounces({ token, query, knownEmails, onProgress }) {
   };
   await Promise.all([worker(), worker(), worker(), worker(), worker()]);
   return { token: state.token, scanned: ids.length, bounces };
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Reply detection + follow-up helpers                                 */
+/* ------------------------------------------------------------------ */
+
+const AUTO_REPLY_SUBJECT = /automatic reply|auto[- ]?reply|autoreply|out of (the )?office|away from (my )?(desk|office)|vacation/i;
+
+// Returns [{ email, repliedAt }]. threadMap: { threadId: email } of sent mail that has no reply yet.
+// Messages.list already gives each message's threadId, so only matching messages need a second call.
+async function scanReplies({ token, query, threadMap, onProgress }) {
+  const state = { token };
+  const matches = [];
+  let pageToken = '';
+  let scanned = 0;
+  do {
+    const page = await gmailGetJson(
+      state,
+      `/messages?maxResults=500&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${pageToken}` : ''}`
+    );
+    (page.messages || []).forEach((m) => {
+      scanned++;
+      if (threadMap[m.threadId]) matches.push({ id: m.id, email: threadMap[m.threadId] });
+    });
+    pageToken = page.nextPageToken || '';
+    if (onProgress) onProgress(scanned);
+  } while (pageToken && scanned < 5000);
+
+  const replies = [];
+  const seen = new Set();
+  for (const match of matches) {
+    if (seen.has(match.email)) continue;
+    const message = await gmailGetJson(
+      state,
+      `/messages/${match.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=Auto-Submitted&metadataHeaders=X-Autoreply&metadataHeaders=Precedence`
+    );
+    const headers = (message.payload && message.payload.headers) || [];
+    const header = (name) => {
+      const found = headers.find((h) => h.name.toLowerCase() === name);
+      return found ? found.value : '';
+    };
+    const autoSubmitted = header('auto-submitted');
+    const isAuto =
+      (autoSubmitted && autoSubmitted.toLowerCase() !== 'no') ||
+      header('x-autoreply') ||
+      /auto_reply|bulk/i.test(header('precedence')) ||
+      AUTO_REPLY_SUBJECT.test(header('subject'));
+    if (isAuto) continue; // "out of office" is not a real reply
+    seen.add(match.email);
+    replies.push({
+      email: match.email,
+      repliedAt: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : new Date().toISOString()
+    });
+  }
+  return { token: state.token, scanned, replies };
+}
+
+// Original Message-ID and subject of a message we sent, so a follow-up lands in the same thread.
+async function getMessageThreadInfo(token, messageId) {
+  const state = { token };
+  const message = await gmailGetJson(
+    state,
+    `/messages/${messageId}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject`
+  );
+  const headers = (message.payload && message.payload.headers) || [];
+  const header = (name) => {
+    const found = headers.find((h) => h.name.toLowerCase() === name);
+    return found ? found.value : '';
+  };
+  return { token: state.token, messageIdHeader: header('message-id'), subject: header('subject') };
+}
+
+
+function looksAutomatic(header) {
+  const autoSubmitted = header('auto-submitted');
+  return Boolean(
+    (autoSubmitted && autoSubmitted.toLowerCase() !== 'no') ||
+      header('x-autoreply') ||
+      /auto_reply|bulk/i.test(header('precedence')) ||
+      AUTO_REPLY_SUBJECT.test(header('subject'))
+  );
+}
+
+function parseSenderAddress(from) {
+  const angle = /<([^>]+)>/.exec(from || '');
+  return normalizeEmail(angle ? angle[1] : from);
+}
+
+/*
+ * Fallback for emails sent before thread IDs were saved: look for mail FROM the exact address
+ * we wrote to. (A reply from a different address of the same company is only found through the
+ * thread, i.e. for emails sent with this version.)
+ */
+async function scanRepliesByAddress({ token, addresses, since, onProgress }) {
+  const state = { token };
+  const replies = [];
+  const found = new Set();
+  for (let i = 0; i < addresses.length; i += 20) {
+    const chunk = addresses.slice(i, i + 20);
+    const wanted = new Set(chunk);
+    const page = await gmailGetJson(
+      state,
+      `/messages?maxResults=100&q=${encodeURIComponent(`from:(${chunk.join(' OR ')}) ${since}`)}`
+    );
+    for (const m of page.messages || []) {
+      const message = await gmailGetJson(
+        state,
+        `/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Auto-Submitted&metadataHeaders=X-Autoreply&metadataHeaders=Precedence`
+      );
+      const headers = (message.payload && message.payload.headers) || [];
+      const header = (name) => {
+        const hit = headers.find((h) => h.name.toLowerCase() === name);
+        return hit ? hit.value : '';
+      };
+      const sender = parseSenderAddress(header('from'));
+      if (!wanted.has(sender) || found.has(sender) || looksAutomatic(header)) continue;
+      found.add(sender);
+      replies.push({
+        email: sender,
+        repliedAt: message.internalDate ? new Date(Number(message.internalDate)).toISOString() : new Date().toISOString()
+      });
+    }
+    if (onProgress) onProgress(Math.min(i + 20, addresses.length), addresses.length);
+  }
+  return { token: state.token, replies };
 }
