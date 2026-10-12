@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Job Mailer</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">UJ</span>
+        <h1>Job Mailer</h1>
+      </div>
+      <div class="header-actions">
+        <button id="openTabBtn" class="icon-btn" title="Open in full tab (recommended for bulk sending)" type="button">&#10530;</button>
+        <button id="openOptionsBtn" class="icon-btn" title="Settings" type="button">&#9881;</button>
+      </div>
+    </header>
+
+    <section id="notification" class="notification hidden" role="status"></section>
+
+    <section class="card" id="authCard">
+      <div class="auth-row">
+        <div>
+          <p class="auth-status" id="authStatusText">Not connected</p>
+          <p class="auth-hint" id="authHintText">Connect your Gmail account to send emails.</p>
+        </div>
+        <div class="auth-actions">
+          <button id="connectBtn" class="btn btn-primary" type="button">Connect Gmail</button>
+          <button id="signOutBtn" class="btn btn-secondary hidden" type="button">Sign Out</button>
+        </div>
+      </div>
+    </section>
+
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-tab="single" type="button">Single Email</button>
+      <button class="tab" data-tab="bulk" type="button">Bulk JSON</button>
+      <button class="tab" data-tab="history" type="button">History <span id="historyCountBadge" class="badge">0</span></button>
+    </nav>
+
+    <section class="tab-panel" id="singlePanel">
+      <div class="card">
+        <label class="field">
+          <span>Recipient Email</span>
+          <input type="email" id="recipientEmail" placeholder="hr@company.com" />
+        </label>
+        <label class="field">
+          <span>Company Name</span>
+          <input type="text" id="companyName" placeholder="Company Name" />
+        </label>
+        <label class="field">
+          <span>Subject</span>
+          <input type="text" id="emailSubject" placeholder="Application for Developer Position" />
+        </label>
+        <label class="field">
+          <span>Email Template</span>
+          <textarea id="emailTemplate" rows="8" placeholder="Dear {{company}} Hiring Team, ..."></textarea>
+        </label>
+        <p class="hint">Variables available: <code>{{company}}</code> <code>{{name}}</code> <code>{{email}}</code></p>
+
+        <div id="previewBox" class="preview-box hidden">
+          <p class="preview-label">Preview</p>
+          <pre id="previewContent"></pre>
+        </div>
+
+        <div class="actions-row">
+          <button id="previewBtn" class="btn btn-secondary" type="button">Preview Email</button>
+          <button id="sendBtn" class="btn btn-primary" type="button">Send Email</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel hidden" id="bulkPanel">
+      <div class="card">
+        <div id="popupModeTip" class="tip hidden">
+          Sending many emails? Click <strong>&#10530;</strong> (top right) to open this in a full tab.
+          The popup closes when you click outside it, which would stop a running send.
+        </div>
+
+        <div class="field">
+          <span>Upload a JSON file (any size)</span>
+          <input type="file" id="bulkJsonFile" accept=".json,.jsonl,.txt,application/json" />
+        </div>
+
+        <label class="field">
+          <span>...or paste JSON recipients (1000+ entries is fine)</span>
+          <textarea id="bulkJsonInput" rows="6" spellcheck="false" placeholder='[{"email":"hr@company.com","company":"Company"}]'></textarea>
+        </label>
+        <p class="hint" id="bulkInputInfo">Brackets and trailing commas are optional.</p>
+
+        <div class="actions-row">
+          <button id="validateJsonBtn" class="btn btn-secondary" type="button">Preview List</button>
+          <button id="sendAllBtn" class="btn btn-primary" type="button" disabled>Send All</button>
+          <button id="stopBtn" class="btn btn-danger hidden" type="button">Stop</button>
+        </div>
+
+        <div id="bulkSummary" class="summary hidden"></div>
+        <div id="bulkProgress" class="progress hidden"><div id="bulkProgressBar" class="progress-bar"></div></div>
+
+        <div id="bulkTableWrap" class="table-wrap hidden">
+          <table id="bulkTable">
+            <thead>
+              <tr>
+                <th>Company</th>
+                <th>Email</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="bulkTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab-panel hidden" id="historyPanel">
+      <div class="card">
+        <p class="history-count"><strong id="historyCount">0</strong> email address(es) in history
+          &middot; <strong id="bouncedCount" class="bounced-num">0</strong> bounced</p>
+        <p class="hint">
+          Every successful send is remembered. Anyone in this list is skipped with
+          &ldquo;Already sent previously&rdquo; if they appear again in a JSON list or in Single Email.
+          Save the history to a file as a backup, or load an old file to restore it.
+        </p>
+
+        <label class="check">
+          <input type="checkbox" id="autoExportCheck" />
+          <span>Automatically save a history file when a bulk send finishes</span>
+        </label>
+
+        <div class="actions-row wrap">
+          <button id="exportHistoryBtn" class="btn btn-primary" type="button">Download history (.json)</button>
+          <button id="clearHistoryBtn" class="btn btn-danger" type="button">Clear history</button>
+        </div>
+
+        <div class="section-title">Bounced emails (address does not exist)</div>
+        <p class="hint">
+          Gmail accepts a message first and only later mails you &ldquo;Delivery Status Notification (Failure)&rdquo;.
+          Wait a few minutes after sending, then click the button. Bounced addresses are marked
+          <code>"status": "bounced"</code> in the history file and are never emailed again.
+        </p>
+        <div class="actions-row wrap">
+          <button id="checkBouncesBtn" class="btn btn-primary" type="button">Check Gmail for bounces</button>
+        </div>
+        <p class="hint" id="bounceProgress"></p>
+        <label class="field">
+          <span>...or paste bounced addresses / the bounce text yourself</span>
+          <textarea id="manualBounceInput" rows="3" spellcheck="false" placeholder="jobs@techland.pl, hr@other.com"></textarea>
+        </label>
+        <div class="actions-row">
+          <button id="markBouncedBtn" class="btn btn-secondary" type="button">Mark as bounced</button>
+        </div>
+
+        <div class="field top-gap">
+          <span>Load an old history file</span>
+          <input type="file" id="importHistoryFile" accept=".json,application/json" />
+        </div>
+        <p class="hint">Loading merges with what is already saved; nothing is removed.</p>
+      </div>
+    </section>
+  </div>
+
+  <div id="confirmModal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Send to all recipients?</h2>
+      <p id="confirmModalText">This will send emails to every valid recipient in the list.</p>
+      <p id="confirmModalWarn" class="modal-warn hidden"></p>
+      <div class="modal-actions">
+        <button id="confirmCancelBtn" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="confirmSendBtn" class="btn btn-primary" type="button">Send All</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="storage.js"></script>
+  <script src="template.js"></script>
+  <script src="gmail.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

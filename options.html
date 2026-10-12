@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Unity Job Mailer — Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="page-header">
+      <span class="brand-mark">UJ</span>
+      <h1>Unity Job Mailer Settings</h1>
+    </header>
+
+    <section id="notification" class="notification hidden" role="status"></section>
+
+    <section class="card">
+      <label class="field">
+        <span>Sender Name</span>
+        <input type="text" id="senderName" placeholder="Your Full Name" />
+      </label>
+
+      <label class="field">
+        <span>Default Subject</span>
+        <input type="text" id="defaultSubject" placeholder="Application for Unity Developer Position" />
+      </label>
+
+      <label class="field">
+        <span>Default Email Template</span>
+        <textarea id="defaultTemplate" rows="10"></textarea>
+      </label>
+      <p class="hint">Variables available: <code>{{company}}</code> <code>{{name}}</code> <code>{{email}}</code></p>
+
+      <label class="field">
+        <span>CV Attachment (PDF)</span>
+        <input type="file" id="cvFile" accept="application/pdf" />
+      </label>
+      <p class="hint" id="cvStatusText">No CV uploaded yet.</p>
+
+      <label class="field">
+        <span>Delay Between Bulk Emails (seconds)</span>
+        <input type="number" id="sendDelaySeconds" min="1" max="120" step="1" />
+      </label>
+
+      <div class="actions-row">
+        <button id="clearBtn" class="btn btn-danger" type="button">Clear Settings</button>
+        <button id="saveBtn" class="btn btn-primary" type="button">Save Settings</button>
+      </div>
+    </section>
+  </div>
+
+  <script src="storage.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
